@@ -1,0 +1,20 @@
+{
+  "name": "gitdrive",
+  "version": "1.0.0",
+  "description": "Git friendly drive",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "backup",
+    "google-drive",
+    "git"
+  ],
+  "author": "Mateus Pires <mateusplpl@gmail.com>",
+  "license": "MIT",
+  "dependencies": {
+    "google-auth-library": "^0.11.0",
+    "googleapis": "^21.3.0"
+  }
+}
