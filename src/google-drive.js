@@ -1,11 +1,12 @@
 const util          = require('./util');
+const errors        = require('./errors');
 const fs            = util.promisifyFs(require('fs'));
 const path          = require('path');
 const readline      = require('readline');
 const google        = require('googleapis');
 const googleAuth    = require('google-auth-library');
 
-const handle        = util.handleGoogleCallback;
+const handle        = util.callbackToPromise;
 
 
 // If modifying these scopes, delete your previously saved credentials
@@ -28,7 +29,8 @@ class GoogleDrive
   connect ()
   {
     return fs.readFileAsync(localFile)
-      .then(content => authorize(JSON.parse(content)))
+      .then(JSON.parse)
+      .then(authorize)
       .then(auth => {
         this.auth = auth;
         this.drive = google.drive({ version: 'v3', auth: this.auth });
@@ -38,14 +40,84 @@ class GoogleDrive
 
   init (parent)
   {
-    return getRoot(this.drive, parent ? parent : 'root')
+    return this._getRootFolderId(parent ? parent : 'root')
       .then(root => {
         this.root = root;
-        return getTree(this.drive, root);
+        return this._getTreeFileId(root);
       })
+      .then(this._readFile.bind(this))
+      .then(JSON.parse)
       .then(tree => {
         this.tree = tree;
-        // TODO
+      });
+  }
+
+  /**
+   * 
+   * @param {string} parent The .gitdrive parent folder name
+   */
+  _initRootFolderId (parent)
+  {
+    return new Promise((resolve, reject) => {
+        const options = {
+          q: "'" + parent + "' in parents and name = '.gitdrive'",
+          fields: 'files(id)',
+          spaces: 'drive'
+        };
+
+        return drive.files.list(options, handle(resolve, reject));
+      })
+
+      .then(response => {
+        // Root folder found
+        if (response.files.length > 0)
+          return response.files[0];
+        
+        // Root folder not found, create it
+        const rootMeta = {
+          name: '.gitdrive',
+          mimeType: 'application/vnd.google-apps.folder'
+        };
+
+        const options = { resource: rootMeta, fields: 'id' };
+        return drive.files.create(options, handle(resolve, reject));
+      })
+
+      .then(file => this.root = file.id);
+  }
+
+  _getTreeFileId (root) {
+    return new Promise((resolve, reject) => {
+        const options = {
+          q: "'" + root + "' in parents and name = '.tree'",
+          fields: 'files(id)',
+          spaces: 'drive'
+        };
+  
+        return drive.files.list(options, handle(resolve, reject));
+      })
+  
+      .then(response => {
+        if (response.files.length === 0)
+          throw new errors.FileNotFound('The tree file wasn\'t found');
+        
+        return response.files[0].id;
+      });
+  }
+
+  _readFile (id)
+  {
+    return new Promise((resolve, reject) => {
+        const content = new Buffer();
+        const options = {
+          fileId: id,
+          alt: 'media'
+        };
+        
+        drive.files.get(options)
+          .on('data', chunk => content += chunk)
+          .on('end', () => resolve(content))
+          .on('error', reject);
       });
   }
 }
@@ -131,70 +203,6 @@ function storeToken(token) {
     console.log('Token stored to ' + TOKEN_PATH);
     resolve();
   });
-}
-
-
-function getRoot(drive, parent) {
-  return new Promise((resolve, reject) => {
-      const options = {
-        q: "'" + parent + "' in parents and name = '.gitdrive'",
-        fields: 'files(id)',
-        spaces: 'drive'
-      };
-
-      return drive.files.list(options, handle(resolve, reject));
-    })
-
-    .then(response => {
-      // Root folder found
-      if (response.files.length > 0)
-        return response.files[0];
-      
-      // Root folder not found, create it
-      const rootMeta = {
-        name: '.gitdrive',
-        mimeType: 'application/vnd.google-apps.folder'
-      };
-
-      const options = { resource: rootMeta, fields: 'id' };
-      return drive.files.create(options, handle(resolve, reject));
-    })
-
-    .then(file => file.id);
-}
-
-function getTree(drive, root) {
-  return new Promise((resolve, reject) => {
-      const options = {
-        q: "'" + root + "' in parents and name = '.tree'",
-        fields: 'files(id)',
-        spaces: 'drive'
-      };
-
-      return drive.files.list(options, handle(resolve, reject));
-    })
-
-    .then(response => {
-      // Tree not found
-      if (response.files.length === 0) return {};
-      
-      // Tree found: download and parse
-      return new Promise((resolve, reject) => {
-          const content = new Buffer();
-          const options = {
-            fileId: response.files[0].id,
-            alt: 'media'
-          };
-          
-          drive.files.get(options)
-            .on('data', chunk => content += chunk)
-            .on('end', () => resolve(content))
-            .on('error', reject);
-        })
-        .then(JSON.parse);
-    })
-
-    .then(file => file.id);
 }
 
 

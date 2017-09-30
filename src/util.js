@@ -18,7 +18,7 @@ exports.log = function () {
   return arguments[0];
 }
 
-exports.handleGoogleCallback = function (resolve, reject)
+exports.callbackToPromise = function (resolve, reject)
 {
   return (error, response) => {
     if (error) return reject(error);
