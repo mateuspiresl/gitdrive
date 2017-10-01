@@ -1,54 +1,221 @@
 const util          = require('./util');
-const fs            = util.promisifyFs(require('fs'));
+const Tree          = require('./tree');
+const fs            = require('fs');
 const path          = require('path');
 const readline      = require('readline');
 const google        = require('googleapis');
 const googleAuth    = require('google-auth-library');
 
-const handle        = util.handleGoogleCallback;
+const handle        = util.callbackToPromise;
 
 
 // If modifying these scopes, delete your previously saved credentials
 // at ~/.credentials/drive-nodejs-quickstart.json
 const SCOPES = ['https://www.googleapis.com/auth/drive'];
-const TOKEN_DIR = (process.env.HOME || process.env.HOMEPATH ||
-    process.env.USERPROFILE) + '/.credentials/';
-const TOKEN_PATH = TOKEN_DIR + 'gitdrive.json';
+const TOKEN_DIR = path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.credentials');
+const TOKEN_PATH = path.join(TOKEN_DIR, 'gitdrive.json');
+const CLIENT_SECRET_PATH = path.join(__dirname, '../client_secret.json');
 
-const localFile = path.join(__dirname, '../client_secret.json');
 
+const ROOT_FILE_NAME = '.gitdrive';
+const TREE_FILE_NAME = '.tree.json';
 
 class GoogleDrive
 {
   constructor ()
   {
+    this.staged = [];
+  }
+
+  async connect ()
+  {
+    const clientSecretFile = fs.readFileSync(CLIENT_SECRET_PATH);
+    this.auth = await authorize(JSON.parse(clientSecretFile));
     
+    const drive = google.drive({ version: 'v3', auth: this.auth });
+    this.drive = util.promisifyDrive(drive, ['list', 'create', 'update']);
   }
 
-  connect ()
+  async init (localParent, remoteParent)
   {
-    return fs.readFileAsync(localFile)
-      .then(content => authorize(JSON.parse(content)))
-      .then(auth => {
-        this.auth = auth;
-        this.drive = google.drive({ version: 'v3', auth: this.auth });
-      })
-      .catch(error => console.log('Error loading client secret file: ' + error));
+    this.remoteParent = remoteParent ? remoteParent : 'root';
+    this.localParent = localParent;
+    this.rootId = await this._initRootFolder(this.remoteParent);
+    this.treeId = await this._getTreeFileId(this.rootId);
+    this.treePath = path.join(this.localParent, TREE_FILE_NAME);
+
+    // Pull remote .tree file
+    if (this.treeId)
+    {
+      util.log('Pulling tree file:', this.treeId);
+      await this._pullFile(this.treeId, TREE_FILE_NAME);
+      util.log('Tree file pulled to', this.treePath);
+      
+      const treeContent = fs.readFileSync(this.treePath);
+      this.tree = Tree.parse(JSON.parse(treeContent));
+      util.log('Tree updated', this.tree);
+    }
+    // No .tree remote file
+    // Create and push .tree file
+    else
+    {
+      util.log('Creating and pushing tree file');
+
+      if (fs.existsSync(this.treePath))
+      {
+        const treeContent = fs.readFileSync(this.treePath);
+        this.tree = Tree.parse(JSON.parse(treeContent));
+
+        util.log('Tree file read from', this.treePath);
+      }
+      else {
+        this.tree = new Tree();
+        fs.writeFileSync(this.treePath, this.tree.toString(), 'utf-8');
+
+        util.log('Tree file created at', this.treePath);
+      }
+      
+      this.treeId = await this._pushFile(TREE_FILE_NAME, this.treePath);
+      util.log('Tree file pushed:', this.treeId);
+    }
   }
 
-  init (parent)
+  list () {
+    return this.tree.content;
+  }
+
+  async add (fileName)
   {
-    return getRoot(this.drive, parent ? parent : 'root')
-      .then(root => {
-        this.root = root;
-        return getTree(this.drive, root);
-      })
-      .then(tree => {
-        this.tree = tree;
-        // TODO
+    util.log('Adding', fileName);
+
+    const file = this.tree.add(fileName);
+    const filePath = path.join(this.localParent, fileName);
+
+    if (file.remoteId)
+      await this._updateFile(file.remoteId, filePath);
+    else
+      file.remoteId = await this._pushFile(fileName, filePath);
+
+    util.log('Pushed ', file);
+
+    this._saveTreeFile();
+    return file;
+  }
+
+  async _initRootFolder (parent)
+  {
+    // Search
+    const response = await this.drive.files.listAsync({
+      q: `'${parent}' in parents and name='${ROOT_FILE_NAME}'`,
+      fields: 'files(id)',
+      spaces: 'drive'
+    });
+    
+    // Found, return id
+    if (response.files.length > 0)
+    {
+      util.log('Root folder exists');
+      return response.files[0].id;
+    }
+
+    util.log('Root folder does not exist, creating');
+    
+    // Not found, create and return id
+    this.rootId = await this.drive.files.createAsync({
+      fields: 'id',
+      resource: {
+        name: ROOT_FILE_NAME,
+        mimeType: 'application/vnd.google-apps.folder'
+      }
+    }).id;
+
+    util.log('Root folder created');
+  }
+
+  async _getTreeFileId ()
+  {
+    const response = await this.drive.files.listAsync({
+      q: `'${this.rootId}' in parents and name='${TREE_FILE_NAME}'`,
+      fields: 'files(id)',
+      spaces: 'drive'
+    });
+
+    if (response.files.length === 0) {
+      util.log('Tree file does not exist');
+      return null;
+    }
+    else {
+      util.log('Tree file exists');
+      return response.files[0].id;
+    }
+  }
+
+  async _saveTreeFile()
+  {
+    util.log('Updating tree file')
+
+    fs.writeFileSync(this.treePath, this.tree.toString(), 'utf-8');      
+    this.treeId = await this._updateFile(this.treeId, this.treePath);
+
+    util.log('Tree file updated', this.treeId);
+  }
+
+  async _pullFile (id, localPath)
+  {
+    return new Promise((resolve, reject) => {
+        const destination = fs.createWriteStream(localPath);
+        const options = {
+          fileId: id,
+          alt: 'media'
+        };
+        
+        this.drive.files.get(options)
+          .on('end', resolve)
+          .on('error', reject)
+          .pipe(destination);
+          // .on('data', chunk => content += chunk)
       });
+      // .then(content => {
+      //   fs.writeFileSync(localPath, content);
+      // });
+  }
+
+  async _pushFile (name, localPath)
+  {
+    util.log('Pushing', name);
+    
+    const file = await this.drive.files.createAsync({
+      fields: 'id',
+      resource: {
+        name: name,
+        parents: [this.rootId]
+      },
+      media: {
+        body: fs.createReadStream(localPath)
+      }
+    });
+
+    return file.id;
+  }
+
+  async _updateFile (id, localPath)
+  {
+    util.log('Updating', id);
+
+    const file = await this.drive.files.updateAsync({
+      fileId: id,
+      media: {
+        body: fs.createReadStream(localPath)
+      }
+    });
+
+    return file.id;
   }
 }
+
+
+module.exports = GoogleDrive;
+
 
 /**
  * Create an OAuth2 client with the given credentials, and then execute the
@@ -57,9 +224,7 @@ class GoogleDrive
  * @param {Object} credentials The authorization client credentials.
  * @param {function} callback The callback to call with the authorized client.
  */
-function authorize(credentials) {
-  console.log(credentials);
-
+async function authorize(credentials) {
   const clientSecret = credentials.installed.client_secret;
   const clientId = credentials.installed.client_id;
   const redirectUrl = credentials.installed.redirect_uris[0];
@@ -67,14 +232,14 @@ function authorize(credentials) {
   const oauth2Client = new auth.OAuth2(clientId, clientSecret, redirectUrl);
 
   // Check if we have previously stored a token
-  return fs.readFileAsync(TOKEN_PATH)
-    
-    .then(token => {
-      oauth2Client.credentials = JSON.parse(token);
-      return oauth2Client;
-    })
-    
-    .catch(error => getNewToken(oauth2Client));
+  try {
+    const token = fs.readFileSync(TOKEN_PATH);
+    oauth2Client.credentials = JSON.parse(token);
+    return oauth2Client;
+  }
+  catch (error) {
+    return getNewToken(oauth2Client);
+  }
 }
 
 /**
@@ -92,7 +257,7 @@ function getNewToken(oauth2Client) {
         scope: SCOPES
       });
 
-      console.log('Authorize this app by visiting this url: ', authUrl);
+      util.log('Authorize this app by visiting this url: ', authUrl);
       
       const rl = readline.createInterface({
         input: process.stdin,
@@ -128,73 +293,9 @@ function storeToken(token) {
     }
 
     fs.writeFileSync(TOKEN_PATH, JSON.stringify(token));
-    console.log('Token stored to ' + TOKEN_PATH);
+    util.log('Token stored to ' + TOKEN_PATH);
     resolve();
   });
-}
-
-
-function getRoot(drive, parent) {
-  return new Promise((resolve, reject) => {
-      const options = {
-        q: "'" + parent + "' in parents and name = '.gitdrive'",
-        fields: 'files(id)',
-        spaces: 'drive'
-      };
-
-      return drive.files.list(options, handle(resolve, reject));
-    })
-
-    .then(response => {
-      // Root folder found
-      if (response.files.length > 0)
-        return response.files[0];
-      
-      // Root folder not found, create it
-      const rootMeta = {
-        name: '.gitdrive',
-        mimeType: 'application/vnd.google-apps.folder'
-      };
-
-      const options = { resource: rootMeta, fields: 'id' };
-      return drive.files.create(options, handle(resolve, reject));
-    })
-
-    .then(file => file.id);
-}
-
-function getTree(drive, root) {
-  return new Promise((resolve, reject) => {
-      const options = {
-        q: "'" + root + "' in parents and name = '.tree'",
-        fields: 'files(id)',
-        spaces: 'drive'
-      };
-
-      return drive.files.list(options, handle(resolve, reject));
-    })
-
-    .then(response => {
-      // Tree not found
-      if (response.files.length === 0) return {};
-      
-      // Tree found: download and parse
-      return new Promise((resolve, reject) => {
-          const content = new Buffer();
-          const options = {
-            fileId: response.files[0].id,
-            alt: 'media'
-          };
-          
-          drive.files.get(options)
-            .on('data', chunk => content += chunk)
-            .on('end', () => resolve(content))
-            .on('error', reject);
-        })
-        .then(JSON.parse);
-    })
-
-    .then(file => file.id);
 }
 
 
@@ -214,16 +315,4 @@ function listFiles(auth) {
       drive.files.list(options, handle(resolve, reject));
     })
     .then(response => response.files);
-}
-
-function createFile(auth) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      auth: auth,
-      resource: { name: 'Test', mimeType: 'text/plain' },
-      media: { mimeType: 'text/plain', body: 'Hello World' }
-    };
-
-    drive.files.create(options, handle(resolve, reject));
-  });
 }
