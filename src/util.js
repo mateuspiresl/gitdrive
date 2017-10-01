@@ -1,3 +1,6 @@
+const chalk = require('chalk');
+
+
 exports.callbackToPromise = callbackToPromise;
 function callbackToPromise(resolve, reject)
 {
@@ -35,16 +38,51 @@ exports.promisifyDrive = function (drive, methods)
   return drive;
 }
 
-exports.log = function () {
+const tagLength = 20;
+const tagSpaces = new Array(tagLength + 1).join(' ');
+
+function parseArgs(args, errorWithStack)
+{
   const parsedArgs = [];
   
-  for (let i in arguments)
-    if (typeof arguments[i] === 'object')
-      parsedArgs.push(JSON.stringify(arguments[i]));
+  for (let i in args)
+    if (args[i] instanceof Error)
+      parsedArgs.push(errorWithStack ? args[i].stack : args[i].toString());
+    else if (typeof args[i] === 'object')
+      parsedArgs.push(JSON.stringify(args[i]));
     else
-      parsedArgs.push(arguments[i]);
+      parsedArgs.push(args[i]);
+  
+  return parsedArgs;
+}
 
-  console.log(...parsedArgs);
+function log(method, colorizer, tag, ...args)
+{
+  if (args.length === 0)
+  {
+    args = [tag];
+    tag = tagSpaces;
+  }
+  else {
+    tag = (tag + tagSpaces).substr(0, tagLength);
+  }
 
-  return arguments[0];
+  const time = new Date().toISOString().replace(/T/, ' ').replace(/\..+/, '');
+  const parsedArgs = parseArgs(args, method === console.error);
+
+  method(chalk.gray(time), chalk.blue(tag), colorizer(...parsedArgs));
+  
+  return args[0];
+}
+
+exports.log = function (tag, ...args) {
+  return log(console.log, chalk.white, tag, ...args);
+}
+
+exports.success = function (tag, ...args) {
+  return log(console.log, chalk.green, tag, ...args);
+}
+
+exports.error = function (tag, ...args) {
+  return log(console.error, chalk.red, tag, ...args);
 }

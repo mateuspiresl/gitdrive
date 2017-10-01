@@ -1,56 +1,62 @@
 const util = require('./util');
+const File = require('./file');
 
 
 class Tree
 {
-  constructor ()
-  {
-    this.count = 0;
+  constructor () {
     this.content = {};
   }
 
   add (fileName)
   {
-    util.log('Searching %s at', fileName, this.content);
-
     if (this.content[fileName])
     {
-      const file = this.content[fileName];
-      util.log('Found', file);
-      
-      file.updateDate = new Date().getTime();
+      const file = File.parse(this.content[fileName]);
       return file;
     }
     else
     {
-      const file = {
-        name: fileName,
-        creationDate: new Date().getTime()
-      };
-      util.log('Creating', file);
-  
+      const file = new File(fileName);
       this.content[fileName] = file;
       return file;
     }
   }
 
-  toString ()
+  get (fileName) {
+    return this.content[fileName];
+  }
+
+  list ()
   {
-    return JSON.stringify({
-      count: this.count,
-      content: this.content
-    });
+    const list = [];
+
+    for (let fileName in this.content)
+      list.push(fileName);
+
+    return list;
+  }
+
+  remove (fileName)
+  {
+    const file = this.content[fileName];
+
+    if (file)
+    {
+      delete this.content[fileName];
+      return file;
+    }
+    else return false;
+  }
+
+  toString () {
+    return JSON.stringify(this);
   }
 
   static parse (treeObject)
   {
-    util.log('Tree parsed from', treeObject);
-
     const tree = new Tree();
-
     tree.content = treeObject.content;
-    tree.count = treeObject.count;
-
     return tree;
   }
 }
